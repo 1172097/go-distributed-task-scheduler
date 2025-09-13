@@ -40,11 +40,18 @@ func (p *Pool) Start(ctx context.Context) {
 					p.DB.Exec(ctx, `UPDATE tasks SET status='running', attempts=attempts+1, updated_at=now() WHERE id=$1`, taskID)
 
 					// run
-					if err := p.Handlers[ttype](ctx, t); err == nil {
+					err = p.Handlers[ttype](ctx, t)
+					if err == nil {
+						// Success log
+						// ...existing code...
+						println("[worker] done task_id=", taskID, "type=", ttype)
 						p.DB.Exec(ctx, `UPDATE tasks SET status='succeeded', updated_at=now() WHERE id=$1`, taskID)
 						metrics.TasksSucceeded.Inc()
 						_ = p.Q.Ack(ctx, payload)
 					} else {
+						// Failure log
+						// ...existing code...
+						println("[worker] FAIL task_id=", taskID, "type=", ttype, "err=", err)
 						p.DB.Exec(ctx, `UPDATE tasks SET status='failed', updated_at=now() WHERE id=$1`, taskID)
 						metrics.TasksFailed.Inc()
 						_ = p.Q.Ack(ctx, payload) // MVP: no retries yet

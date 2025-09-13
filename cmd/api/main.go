@@ -43,10 +43,12 @@ func main() {
 		var id string
 		payloadBytes, _ := json.Marshal(req.Payload)
 		err := pg.QueryRow(ctx, `
-      INSERT INTO tasks (type, priority, payload) VALUES ($1,$2,$3) RETURNING id`,
+			INSERT INTO tasks (type, priority, payload) VALUES ($1,$2,$3) RETURNING id`,
 			req.Type, req.Priority, payloadBytes).Scan(&id)
 		if err != nil {
+			// Detailed error log
 			c.JSON(500, gin.H{"error": err.Error()})
+			println("[API] DB insert error:", err.Error())
 			return
 		}
 
@@ -55,6 +57,7 @@ func main() {
 		b, _ := json.Marshal(msg)
 		if err := rq.Enqueue(ctx, req.Priority, string(b)); err != nil {
 			c.JSON(500, gin.H{"error": err.Error()})
+			println("[API] Redis enqueue error:", err.Error())
 			return
 		}
 

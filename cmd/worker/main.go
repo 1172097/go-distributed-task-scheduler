@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"time"
 
@@ -20,7 +21,10 @@ func main() {
 	pg := db.MustOpen(ctx, cfg.PostgresURL)
 	rq := queue.New(cfg.RedisAddr, cfg.RedisPass)
 	metrics.MustRegister()
+	log.Printf("Worker metrics listening on %s", cfg.MetricsAddr)
 	go func() { _ = http.ListenAndServe(cfg.MetricsAddr, promhttp.Handler()) }()
+
+	log.Println("Worker is starting...") // Added log statement
 
 	handlers := map[string]worker.Handler{
 		"noop": func(ctx context.Context, t map[string]any) error { time.Sleep(100 * time.Millisecond); return nil },
