@@ -16,10 +16,11 @@ import (
 )
 
 type EnqueueRequest struct {
-	Type     string         `json:"type" binding:"required"`
-	Priority string         `json:"priority" binding:"required,oneof=critical high default low"`
-	Payload  map[string]any `json:"payload" binding:"required"`
-	IdemKey  *string        `json:"idempotency_key"`
+	Type       string         `json:"type" binding:"required"`
+	Priority   string         `json:"priority" binding:"required,oneof=critical high default low"`
+	Payload    map[string]any `json:"payload" binding:"required"`
+	IdemKey    *string        `json:"idempotency_key"` // NEW
+	MaxRetries *int           `json:"max_retries"`     // optional, used later
 }
 
 func main() {
@@ -39,21 +40,66 @@ func main() {
 			return
 		}
 
-		// Insert task (idempotency-lite: let duplicates happen for MVP; we’ll harden later)
-		var id string
-		payloadBytes, _ := json.Marshal(req.Payload)
-		err := pg.QueryRow(ctx, `
-			INSERT INTO tasks (type, priority, payload) VALUES ($1,$2,$3) RETURNING id`,
-			req.Type, req.Priority, payloadBytes).Scan(&id)
+		ctx := c.Request.Context()
+		tx, err := pg.Begin(ctx)
 		if err != nil {
-			// Detailed error log
 			c.JSON(500, gin.H{"error": err.Error()})
-			println("[API] DB insert error:", err.Error())
+			return
+		}
+		defer tx.Rollback(ctx)
+
+		// If an idempotency key is provided and we've seen it, return the same task
+		var existingTaskID string
+		if req.IdemKey != nil {
+			if err := tx.QueryRow(ctx, `SELECT task_id FROM idempotency_keys WHERE key=$1`, *req.IdemKey).Scan(&existingTaskID); err == nil {
+				// We’ve already created this task for this key
+				if err := tx.Commit(ctx); err != nil {
+					c.JSON(500, gin.H{"error": err.Error()})
+					return
+				}
+				c.JSON(200, gin.H{"task_id": existingTaskID, "status": "duplicate"})
+				return
+			}
+		}
+
+		// Create a new task
+		maxRetries := 5
+		if req.MaxRetries != nil {
+			maxRetries = *req.MaxRetries
+		}
+
+		payloadBytes, _ := json.Marshal(req.Payload)
+		var taskID string
+		if err := tx.QueryRow(ctx, `
+	 		INSERT INTO tasks(type, priority, payload, idempotency_key, max_retries)
+	 		VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+			req.Type, req.Priority, payloadBytes, req.IdemKey, maxRetries,
+		).Scan(&taskID); err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
 			return
 		}
 
-		// Enqueue minimal message
-		msg := map[string]any{"task_id": id, "type": req.Type, "priority": req.Priority, "enqueued_at": time.Now().UnixMilli()}
+		// Record the idempotency mapping (no-op if key is nil)
+		if req.IdemKey != nil {
+			if _, err := tx.Exec(ctx, `
+	 			INSERT INTO idempotency_keys(key, task_id)
+	 			VALUES ($1,$2) ON CONFLICT DO NOTHING`,
+				*req.IdemKey, taskID,
+			); err != nil {
+				c.JSON(500, gin.H{"error": err.Error()})
+				return
+			}
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+
+		// Enqueue to Redis (same as before)
+		msg := map[string]any{
+			"task_id": taskID, "type": req.Type, "priority": req.Priority, "enqueued_at": time.Now().UnixMilli(),
+		}
 		b, _ := json.Marshal(msg)
 		if err := rq.Enqueue(ctx, req.Priority, string(b)); err != nil {
 			c.JSON(500, gin.H{"error": err.Error()})
@@ -62,7 +108,7 @@ func main() {
 		}
 
 		metrics.TasksEnqueued.Inc()
-		c.JSON(202, gin.H{"task_id": id, "status": "queued"})
+		c.JSON(202, gin.H{"task_id": taskID, "status": "queued"})
 	})
 
 	r.GET("/healthz", func(c *gin.Context) { c.String(200, "ok") })
