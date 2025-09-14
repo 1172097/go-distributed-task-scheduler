@@ -16,9 +16,11 @@ var (
 	TasksSucceeded = prometheus.NewCounter(prometheus.CounterOpts{Name: "tasks_succeeded_total"})
 	TasksFailed    = prometheus.NewCounter(prometheus.CounterOpts{Name: "tasks_failed_total"})
 	TasksRetried   = prometheus.NewCounter(prometheus.CounterOpts{Name: "tasks_retried_total"})
+	TasksReaped    = prometheus.NewCounter(prometheus.CounterOpts{Name: "tasks_reaped_total"})
 
-	RetrySetDepth = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "retry_set_depth"}, []string{"priority"})
-	DLQDepth      = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "dlq_depth"}, []string{"priority"})
+	RetrySetDepth      = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "retry_set_depth"}, []string{"priority"})
+	DLQDepth           = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "dlq_depth"}, []string{"priority"})
+	ProcessingInflight = prometheus.NewGauge(prometheus.GaugeOpts{Name: "processing_inflight"})
 )
 
 func MustRegister() {
@@ -28,7 +30,9 @@ func MustRegister() {
 		TasksSucceeded,
 		TasksFailed,
 		TasksRetried,
+		TasksReaped,
 		RetrySetDepth,
 		DLQDepth,
+		ProcessingInflight,
 	)
 }

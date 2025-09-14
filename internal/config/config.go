@@ -14,12 +14,14 @@ import (
 )
 
 type Config struct {
-	PostgresURL string
-	RedisAddr   string
-	RedisPass   string
-	MetricsAddr string
-	WorkerPool  int
-	VisTimeoutS int
+	PostgresURL          string
+	RedisAddr            string
+	RedisPass            string
+	MetricsAddr          string
+	WorkerPool           int
+	VisTimeoutMS         int
+	ReaperScanIntervalMS int
+	ReaperBatchSize      int
 
 	RetryBaseMS         int
 	RetryMaxMS          int
@@ -29,13 +31,15 @@ type Config struct {
 }
 
 func FromEnv() Config {
-	return Config{
-		PostgresURL: getenv("POSTGRES_URL", "postgres://app:app@localhost:5432/app?sslmode=disable"),
-		RedisAddr:   getenv("REDIS_ADDR", "localhost:6379"),
-		RedisPass:   os.Getenv("REDIS_PASS"),
-		MetricsAddr: getenv("METRICS_ADDR", ":2112"),
-		WorkerPool:  atoi(getenv("WORKER_POOL", "8")),
-		VisTimeoutS: atoi(getenv("VIS_TIMEOUT_SEC", "60")),
+	cfg := Config{
+		PostgresURL:          getenv("POSTGRES_URL", "postgres://app:app@localhost:5432/app?sslmode=disable"),
+		RedisAddr:            getenv("REDIS_ADDR", "localhost:6379"),
+		RedisPass:            os.Getenv("REDIS_PASS"),
+		MetricsAddr:          getenv("METRICS_ADDR", ":2112"),
+		WorkerPool:           atoi(getenv("WORKER_POOL", "8")),
+		VisTimeoutMS:         atoi(getenv("VIS_TIMEOUT_MS", "60000")),
+		ReaperScanIntervalMS: atoi(getenv("REAPER_SCAN_INTERVAL_MS", "2000")),
+		ReaperBatchSize:      atoi(getenv("REAPER_BATCH_SIZE", "100")),
 
 		RetryBaseMS:         atoi(getenv("RETRY_BASE_MS", "500")),
 		RetryMaxMS:          atoi(getenv("RETRY_MAX_MS", "30000")),
@@ -43,6 +47,12 @@ func FromEnv() Config {
 		RetryScanIntervalMS: atoi(getenv("RETRY_SCAN_INTERVAL_MS", "500")),
 		RetryBatchSize:      atoi(getenv("RETRY_BATCH_SIZE", "100")),
 	}
+	// basic validation: visibility timeout should exceed handler p95 (~1s)
+	const handlerP95MS = 1000
+	if cfg.VisTimeoutMS < handlerP95MS {
+		cfg.VisTimeoutMS = handlerP95MS
+	}
+	return cfg
 }
 func getenv(k, d string) string {
 	if v := os.Getenv(k); v != "" {

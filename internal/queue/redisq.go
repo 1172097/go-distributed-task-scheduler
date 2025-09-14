@@ -14,15 +14,17 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-type RedisQ struct{ C *redis.Client }
+type RedisQ struct {
+	C *redis.Client
+}
 
 func New(addr, pass string) *RedisQ {
 	return &RedisQ{C: redis.NewClient(&redis.Options{Addr: addr, Password: pass})}
 }
 
-func (q *RedisQ) Q(pri string) string { return "q:" + pri }
-func (q *RedisQ) Processing() string  { return "q:processing" }
-
+func (q *RedisQ) Q(pri string) string        { return "q:" + pri }
+func (q *RedisQ) Processing() string         { return "q:processing" }
+func (q *RedisQ) KeyProcDeadlines() string   { return "q:processing:deadlines" }
 func (q *RedisQ) KeyRetry(pri string) string { return "q:" + pri + ":retry" }
 func (q *RedisQ) KeyDLQ(pri string) string   { return "q:" + pri + ":dlq" }
 
@@ -30,11 +32,27 @@ func (q *RedisQ) Enqueue(ctx context.Context, pri, payload string) error {
 	return q.C.RPush(ctx, q.Q(pri), payload).Err()
 }
 
-// Blocking pop → processing (visibility handled later; MVP keeps it simple)
-func (q *RedisQ) BRPopLPush(ctx context.Context, pri string, timeout time.Duration) (string, error) {
-	return q.C.BRPopLPush(ctx, q.Q(pri), q.Processing(), timeout).Result()
+// Blocking pop → processing, also recording a visibility deadline
+func (q *RedisQ) BRPopLPush(ctx context.Context, pri string, timeout time.Duration, visTimeout time.Duration) (string, error) {
+	payload, err := q.C.BRPopLPush(ctx, q.Q(pri), q.Processing(), timeout).Result()
+	if err != nil || payload == "" {
+		return payload, err
+	}
+	deadline := time.Now().Add(visTimeout).UnixMilli()
+	_ = q.C.ZAdd(ctx, q.KeyProcDeadlines(), redis.Z{Score: float64(deadline), Member: payload}).Err()
+	return payload, nil
 }
 
+// Ack removes payload from processing list and deadline set
 func (q *RedisQ) Ack(ctx context.Context, payload string) error {
-	return q.C.LRem(ctx, q.Processing(), 1, payload).Err()
+	pipe := q.C.TxPipeline()
+	pipe.LRem(ctx, q.Processing(), 1, payload)
+	pipe.ZRem(ctx, q.KeyProcDeadlines(), payload)
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
+// LLen returns the length of the given list key
+func (q *RedisQ) LLen(ctx context.Context, key string) (int64, error) {
+	return q.C.LLen(ctx, key).Result()
 }
