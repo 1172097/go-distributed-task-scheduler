@@ -39,6 +39,7 @@ func main() {
 	// }
 	var failCount int
 	handlers := map[string]worker.Handler{
+		"noop": func(ctx context.Context, t map[string]any) error { time.Sleep(100 * time.Millisecond); return nil },
 		"fail": func(ctx context.Context, t map[string]any) error { return fmt.Errorf("always fails") },
 		"flaky": func(ctx context.Context, t map[string]any) error {
 			if failCount < 3 {
