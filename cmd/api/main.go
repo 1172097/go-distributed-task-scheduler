@@ -1,5 +1,8 @@
 package main
 
+// TODO:
+// - No changes in this step (idempotency already added in step 1).
+
 import (
 	"context"
 	"encoding/json"

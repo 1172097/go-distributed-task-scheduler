@@ -1,13 +1,23 @@
 package worker
 
+// TODO:
+// - In the worker failure path:
+//   Read max_retries for the task (from DB). If attempt >= max_retries: Ack, push to q:{priority}:dlq, update DB failed, inc tasks_failed_total. Else: compute backoff = base*2^(attempt-1)+jitter (clamped), Ack, add to q:{priority}:retry ZSET with score now+backoff, inc tasks_retried_total, optionally set status back to queued.
+// - Add a retry pump goroutine scanning each priority's retry ZSET every RETRY_SCAN_INTERVAL_MS, popping up to RETRY_BATCH_SIZE due items and re-enqueuing to main queue. Update gauges for retry_set_depth and dlq_depth periodically (optional).
+// - Make backoff parameters configurable with sane defaults (wired via config).
+
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"math"
+	"math/rand"
 	"time"
 
 	"github.com/1172097/scheduler/internal/metrics"
 	"github.com/1172097/scheduler/internal/queue"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
 type Handler func(ctx context.Context, task map[string]any) error
@@ -19,9 +29,20 @@ type Pool struct {
 	DB       *pgxpool.Pool
 	Handlers map[string]Handler
 	PoolSize int
+
+	// retry/backoff configuration
+	RetryBase         time.Duration
+	RetryMax          time.Duration
+	RetryJitter       time.Duration
+	RetryScanInterval time.Duration
+	RetryBatchSize    int
 }
 
 func (p *Pool) Start(ctx context.Context) {
+	// seed jitter randomness
+	rand.Seed(time.Now().UnixNano())
+	// start retry pump once
+	go p.retryPump(ctx)
 	for i := 0; i < p.PoolSize; i++ {
 		go func() {
 			for {
@@ -49,15 +70,110 @@ func (p *Pool) Start(ctx context.Context) {
 						metrics.TasksSucceeded.Inc()
 						_ = p.Q.Ack(ctx, payload)
 					} else {
-						// Failure log
-						// ...existing code...
+						// Failure path: decide retry or DLQ
 						println("[worker] FAIL task_id=", taskID, "type=", ttype, "err=", err)
-						p.DB.Exec(ctx, `UPDATE tasks SET status='failed', updated_at=now() WHERE id=$1`, taskID)
-						metrics.TasksFailed.Inc()
-						_ = p.Q.Ack(ctx, payload) // MVP: no retries yet
+
+						// read attempts and max_retries
+						var attempts, maxRetries int
+						if qerr := p.DB.QueryRow(ctx, `SELECT attempts, max_retries FROM tasks WHERE id=$1`, taskID).Scan(&attempts, &maxRetries); qerr != nil {
+							// best effort: if we cannot read, DLQ to be safe
+							_ = p.Q.Ack(ctx, payload)
+							_ = p.Q.C.RPush(ctx, p.Q.KeyDLQ(pri), payload).Err()
+							metrics.TasksFailed.Inc()
+							p.DB.Exec(ctx, `UPDATE tasks SET status='failed', updated_at=now() WHERE id=$1`, taskID)
+							continue
+						}
+
+						if attempts >= maxRetries {
+							// Exhausted retries → DLQ
+							_ = p.Q.Ack(ctx, payload)
+							_ = p.Q.C.RPush(ctx, p.Q.KeyDLQ(pri), payload).Err()
+							metrics.TasksFailed.Inc()
+							p.DB.Exec(ctx, `UPDATE tasks SET status='failed', updated_at=now() WHERE id=$1`, taskID)
+						} else {
+							// Schedule retry with exponential backoff + jitter
+							backoff := p.computeBackoff(time.Duration(attempts))
+							dueAt := time.Now().Add(backoff).UnixMilli()
+							_ = p.Q.Ack(ctx, payload)
+							// add to retry ZSET (score = dueAt)
+							_ = p.Q.C.ZAdd(ctx, p.Q.KeyRetry(pri), redis.Z{Score: float64(dueAt), Member: payload}).Err()
+							metrics.TasksRetried.Inc()
+							// set back to queued (optional)
+							p.DB.Exec(ctx, `UPDATE tasks SET status='queued', updated_at=now() WHERE id=$1`, taskID)
+						}
 					}
 				}
 			}
 		}()
+	}
+}
+
+func (p *Pool) computeBackoff(attempt time.Duration) time.Duration {
+	// attempt is 1-based (we increment when marking running)
+	base := p.RetryBase
+	max := p.RetryMax
+	jitterMax := p.RetryJitter
+	exp := time.Duration(math.Pow(2, float64(attempt-1)))
+	backoff := base * exp
+	if backoff > max {
+		backoff = max
+	}
+	if jitterMax > 0 {
+		j := time.Duration(rand.Int63n(int64(jitterMax)))
+		backoff += j
+		if backoff > max {
+			backoff = max
+		}
+	}
+	return backoff
+}
+
+func (p *Pool) retryPump(ctx context.Context) {
+	if p.RetryScanInterval <= 0 {
+		p.RetryScanInterval = 500 * time.Millisecond
+	}
+	if p.RetryBatchSize <= 0 {
+		p.RetryBatchSize = 100
+	}
+	ticker := time.NewTicker(p.RetryScanInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			nowMs := time.Now().UnixMilli()
+			for _, pri := range priorities {
+				// fetch due items up to batch size
+				zr := &redis.ZRangeBy{Min: "-inf", Max: fmt.Sprintf("%d", nowMs), Offset: 0, Count: int64(p.RetryBatchSize)}
+				items, err := p.Q.C.ZRangeByScore(ctx, p.Q.KeyRetry(pri), zr).Result()
+				if err != nil || len(items) == 0 {
+					// update gauges even if empty
+					p.updateGauges(ctx, pri)
+					continue
+				}
+				for _, m := range items {
+					// best-effort removal guard to avoid duplicates if multiple pumps (shouldn't happen)
+					removed, _ := p.Q.C.ZRem(ctx, p.Q.KeyRetry(pri), m).Result()
+					if removed == 0 {
+						continue
+					}
+					// re-enqueue to main queue
+					_ = p.Q.Enqueue(ctx, pri, m)
+				}
+				// update gauges after processing
+				p.updateGauges(ctx, pri)
+			}
+		}
+	}
+}
+
+func (p *Pool) updateGauges(ctx context.Context, pri string) {
+	// retry set depth
+	if sz, err := p.Q.C.ZCard(ctx, p.Q.KeyRetry(pri)).Result(); err == nil {
+		metrics.RetrySetDepth.WithLabelValues(pri).Set(float64(sz))
+	}
+	if dlqSz, err := p.Q.C.LLen(ctx, p.Q.KeyDLQ(pri)).Result(); err == nil {
+		metrics.DLQDepth.WithLabelValues(pri).Set(float64(dlqSz))
 	}
 }

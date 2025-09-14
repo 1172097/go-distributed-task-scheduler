@@ -1,5 +1,12 @@
 package queue
 
+// TODO:
+// - Add helpers returning keys:
+//   KeyRetry(priority) -> "q:{priority}:retry"
+//   KeyDLQ(priority) -> "q:{priority}:dlq"
+// - Expose Client if needed for ZSET ops (we already use it elsewhere).
+// - Keep existing Enqueue, Ack, Processing helpers unchanged.
+
 import (
 	"context"
 	"time"
@@ -15,6 +22,9 @@ func New(addr, pass string) *RedisQ {
 
 func (q *RedisQ) Q(pri string) string { return "q:" + pri }
 func (q *RedisQ) Processing() string  { return "q:processing" }
+
+func (q *RedisQ) KeyRetry(pri string) string { return "q:" + pri + ":retry" }
+func (q *RedisQ) KeyDLQ(pri string) string   { return "q:" + pri + ":dlq" }
 
 func (q *RedisQ) Enqueue(ctx context.Context, pri, payload string) error {
 	return q.C.RPush(ctx, q.Q(pri), payload).Err()
