@@ -60,23 +60,27 @@ func (p *Pool) Start(ctx context.Context) {
 					metrics.TasksDequeued.WithLabelValues(pri).Inc()
 
 					func() {
-						defer p.Q.Ack(ctx, payload)
-
 						var t map[string]any
 						_ = json.Unmarshal([]byte(payload), &t)
-						ttype := t["type"].(string)
-						taskID := t["task_id"].(string)
+						ttype, _ := t["type"].(string)
+						taskID, _ := t["task_id"].(string)
 						// mark running
 						p.DB.Exec(ctx, `UPDATE tasks SET status='running', attempts=attempts+1, updated_at=now() WHERE id=$1`, taskID)
 
 						// run
 						err = p.Handlers[ttype](ctx, t)
 						if err == nil {
-							// Success path
-							println("[worker] done task_id=", taskID, "type=", ttype)
-							p.DB.Exec(ctx, `UPDATE tasks SET status='succeeded', updated_at=now() WHERE id=$1`, taskID)
-							metrics.TasksSucceeded.Inc()
-							_ = p.Q.Ack(ctx, payload)
+							// Success path: finalize only if we still own the lease
+							owned, ackErr := p.Q.AckOwned(ctx, payload)
+							if ackErr != nil {
+								println("[worker] ack error on success, task_id=", taskID, "err=", ackErr.Error())
+								return
+							}
+							if owned {
+								println("[worker] done task_id=", taskID, "type=", ttype)
+								p.DB.Exec(ctx, `UPDATE tasks SET status='succeeded', updated_at=now() WHERE id=$1`, taskID)
+								metrics.TasksSucceeded.Inc()
+							}
 						} else {
 							// Failure path: decide retry or DLQ
 							println("[worker] FAIL task_id=", taskID, "type=", ttype, "err=", err)
@@ -84,30 +88,33 @@ func (p *Pool) Start(ctx context.Context) {
 							// read attempts and max_retries
 							var attempts, maxRetries int
 							if qerr := p.DB.QueryRow(ctx, `SELECT attempts, max_retries FROM tasks WHERE id=$1`, taskID).Scan(&attempts, &maxRetries); qerr != nil {
-								// best effort: if we cannot read, DLQ to be safe
-								_ = p.Q.Ack(ctx, payload)
-								_ = p.Q.C.RPush(ctx, p.Q.KeyDLQ(pri), payload).Err()
-								metrics.TasksFailed.Inc()
-								p.DB.Exec(ctx, `UPDATE tasks SET status='failed', updated_at=now() WHERE id=$1`, taskID)
+								// best effort: if we cannot read, DLQ only if still owned
+								if owned, _ := p.Q.AckOwned(ctx, payload); owned {
+									_ = p.Q.C.RPush(ctx, p.Q.KeyDLQ(pri), payload).Err()
+									metrics.TasksFailed.Inc()
+									p.DB.Exec(ctx, `UPDATE tasks SET status='failed', updated_at=now() WHERE id=$1`, taskID)
+								}
 								return
 							}
 
 							if attempts >= maxRetries {
-								// Exhausted retries → DLQ
-								_ = p.Q.Ack(ctx, payload)
-								_ = p.Q.C.RPush(ctx, p.Q.KeyDLQ(pri), payload).Err()
-								metrics.TasksFailed.Inc()
-								p.DB.Exec(ctx, `UPDATE tasks SET status='failed', updated_at=now() WHERE id=$1`, taskID)
+								// Exhausted retries → DLQ (only if still owned)
+								if owned, _ := p.Q.AckOwned(ctx, payload); owned {
+									_ = p.Q.C.RPush(ctx, p.Q.KeyDLQ(pri), payload).Err()
+									metrics.TasksFailed.Inc()
+									p.DB.Exec(ctx, `UPDATE tasks SET status='failed', updated_at=now() WHERE id=$1`, taskID)
+								}
 							} else {
-								// Schedule retry with exponential backoff + jitter
+								// Schedule retry with exponential backoff + jitter (only if still owned)
 								backoff := p.computeBackoff(time.Duration(attempts))
 								dueAt := time.Now().Add(backoff).UnixMilli()
-								_ = p.Q.Ack(ctx, payload)
-								// add to retry ZSET (score = dueAt)
-								_ = p.Q.C.ZAdd(ctx, p.Q.KeyRetry(pri), redis.Z{Score: float64(dueAt), Member: payload}).Err()
-								metrics.TasksRetried.Inc()
-								// set back to queued (optional)
-								p.DB.Exec(ctx, `UPDATE tasks SET status='queued', updated_at=now() WHERE id=$1`, taskID)
+								if owned, _ := p.Q.AckOwned(ctx, payload); owned {
+									// add to retry ZSET (score = dueAt)
+									_ = p.Q.C.ZAdd(ctx, p.Q.KeyRetry(pri), redis.Z{Score: float64(dueAt), Member: payload}).Err()
+									metrics.TasksRetried.Inc()
+									// set back to queued (optional)
+									p.DB.Exec(ctx, `UPDATE tasks SET status='queued', updated_at=now() WHERE id=$1`, taskID)
+								}
 							}
 						}
 					}()

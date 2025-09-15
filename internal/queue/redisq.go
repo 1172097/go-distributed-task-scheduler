@@ -45,11 +45,24 @@ func (q *RedisQ) BRPopLPush(ctx context.Context, pri string, timeout time.Durati
 
 // Ack removes payload from processing list and deadline set
 func (q *RedisQ) Ack(ctx context.Context, payload string) error {
-	pipe := q.C.TxPipeline()
-	pipe.LRem(ctx, q.Processing(), 1, payload)
-	pipe.ZRem(ctx, q.KeyProcDeadlines(), payload)
-	_, err := pipe.Exec(ctx)
+	_, err := q.AckOwned(ctx, payload)
 	return err
+}
+
+// AckOwned tries to ack the payload and reports whether anything was removed.
+// Returns (owned=true) when this worker still held the lease (i.e., the item
+// was present in the processing list and/or deadline set). If owned=false,
+// another actor (e.g., the reaper) already reclaimed it.
+func (q *RedisQ) AckOwned(ctx context.Context, payload string) (bool, error) {
+	pipe := q.C.TxPipeline()
+	lrem := pipe.LRem(ctx, q.Processing(), 1, payload)
+	zrem := pipe.ZRem(ctx, q.KeyProcDeadlines(), payload)
+	_, err := pipe.Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	removed := lrem.Val() + zrem.Val()
+	return removed > 0, nil
 }
 
 // LLen returns the length of the given list key
