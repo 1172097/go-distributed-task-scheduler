@@ -110,7 +110,7 @@ func main() {
 			return
 		}
 
-		metrics.TasksEnqueued.Inc()
+		metrics.IncEnqueued()
 		c.JSON(202, gin.H{"task_id": taskID, "status": "queued"})
 	})
 

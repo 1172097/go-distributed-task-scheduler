@@ -1,14 +1,8 @@
 package queue
 
-// TODO:
-// - Add helpers returning keys:
-//   KeyRetry(priority) -> "q:{priority}:retry"
-//   KeyDLQ(priority) -> "q:{priority}:dlq"
-// - Expose Client if needed for ZSET ops (we already use it elsewhere).
-// - Keep existing Enqueue, Ack, Processing helpers unchanged.
-
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -29,6 +23,7 @@ func (q *RedisQ) KeyRetry(pri string) string { return "q:" + pri + ":retry" }
 func (q *RedisQ) KeyDLQ(pri string) string   { return "q:" + pri + ":dlq" }
 
 func (q *RedisQ) Enqueue(ctx context.Context, pri, payload string) error {
+	payload = ensureMetadata(pri, payload)
 	return q.C.RPush(ctx, q.Q(pri), payload).Err()
 }
 
@@ -68,4 +63,49 @@ func (q *RedisQ) AckOwned(ctx context.Context, payload string) (bool, error) {
 // LLen returns the length of the given list key
 func (q *RedisQ) LLen(ctx context.Context, key string) (int64, error) {
 	return q.C.LLen(ctx, key).Result()
+}
+
+func (q *RedisQ) QueueDepth(ctx context.Context, pri string) (int64, error) {
+	return q.C.LLen(ctx, q.Q(pri)).Result()
+}
+
+func (q *RedisQ) RetryDepth(ctx context.Context, pri string) (int64, error) {
+	return q.C.ZCard(ctx, q.KeyRetry(pri)).Result()
+}
+
+func (q *RedisQ) DLQDepth(ctx context.Context, pri string) (int64, error) {
+	return q.C.LLen(ctx, q.KeyDLQ(pri)).Result()
+}
+
+func (q *RedisQ) ProcessingDepth(ctx context.Context) (int64, error) {
+	return q.C.LLen(ctx, q.Processing()).Result()
+}
+
+func ensureMetadata(pri, payload string) string {
+	if payload == "" {
+		return payload
+	}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(payload), &body); err != nil {
+		return payload
+	}
+	updated := false
+	if pri != "" {
+		if v, ok := body["priority"].(string); !ok || v != pri {
+			body["priority"] = pri
+			updated = true
+		}
+	}
+	enqueueTs := time.Now().UnixMilli()
+	if v, ok := body["enqueued_at"].(float64); !ok || int64(v) != enqueueTs {
+		body["enqueued_at"] = enqueueTs
+		updated = true
+	}
+	if !updated {
+		return payload
+	}
+	if b, err := json.Marshal(body); err == nil {
+		return string(b)
+	}
+	return payload
 }

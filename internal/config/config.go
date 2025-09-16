@@ -22,6 +22,7 @@ type Config struct {
 	VisTimeoutMS         int
 	ReaperScanIntervalMS int
 	ReaperBatchSize      int
+	MetricsSampleMS      int
 
 	RetryBaseMS         int
 	RetryMaxMS          int
@@ -40,6 +41,7 @@ func FromEnv() Config {
 		VisTimeoutMS:         atoi(getenv("VIS_TIMEOUT_MS", "60000")),
 		ReaperScanIntervalMS: atoi(getenv("REAPER_SCAN_INTERVAL_MS", "2000")),
 		ReaperBatchSize:      atoi(getenv("REAPER_BATCH_SIZE", "100")),
+		MetricsSampleMS:      atoi(getenv("METRICS_SAMPLE_MS", "2000")),
 
 		RetryBaseMS:         atoi(getenv("RETRY_BASE_MS", "500")),
 		RetryMaxMS:          atoi(getenv("RETRY_MAX_MS", "30000")),
