@@ -1,0 +1,30 @@
+groups:
+- name: scheduler
+  rules:
+  - alert: QueueStuckHigh
+    expr: sum(queue_depth) by (priority) > 1000
+    for: 5m
+    labels: { severity: warning }
+    annotations:
+      summary: "Queue depth > 1000 for 5m (priority={{ $labels.priority }})"
+
+  - alert: HighFailureRate
+    expr: increase(tasks_failed_total[5m]) / (increase(tasks_succeeded_total[5m]) + 1) > 0.1
+    for: 5m
+    labels: { severity: warning }
+    annotations:
+      summary: "Failure rate > 10% over 5m"
+
+  - alert: SlowP95Run
+    expr: histogram_quantile(0.95, sum(rate(task_run_seconds_bucket[5m])) by (le)) > 0.5
+    for: 5m
+    labels: { severity: warning }
+    annotations:
+      summary: "p95 task run latency > 500ms for 5m"
+
+  - alert: RetriesSurge
+    expr: increase(tasks_retried_total[5m]) > 500
+    for: 2m
+    labels: { severity: info }
+    annotations:
+      summary: "Spike in retries (>500 in 5m)"

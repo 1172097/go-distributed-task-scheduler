@@ -28,6 +28,22 @@ func (q *RedisQ) KeyProcDeadlines() string   { return "q:processing:deadlines" }
 func (q *RedisQ) KeyRetry(pri string) string { return "q:" + pri + ":retry" }
 func (q *RedisQ) KeyDLQ(pri string) string   { return "q:" + pri + ":dlq" }
 
+func (q *RedisQ) QueueDepth(ctx context.Context, pri string) (int64, error) {
+	return q.LLen(ctx, q.Q(pri))
+}
+
+func (q *RedisQ) RetryDepth(ctx context.Context, pri string) (int64, error) {
+	return q.C.ZCard(ctx, q.KeyRetry(pri)).Result()
+}
+
+func (q *RedisQ) DLQDepth(ctx context.Context, pri string) (int64, error) {
+	return q.LLen(ctx, q.KeyDLQ(pri))
+}
+
+func (q *RedisQ) ProcessingDepth(ctx context.Context) (int64, error) {
+	return q.LLen(ctx, q.Processing())
+}
+
 func (q *RedisQ) Enqueue(ctx context.Context, pri, payload string) error {
 	return q.C.RPush(ctx, q.Q(pri), payload).Err()
 }

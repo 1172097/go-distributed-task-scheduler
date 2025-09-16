@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"strconv"
 	"time"
 
 	"github.com/1172097/scheduler/internal/metrics"
@@ -37,6 +38,8 @@ type Pool struct {
 	RetryScanInterval time.Duration
 	RetryBatchSize    int
 
+	MetricsSampleInterval time.Duration
+
 	// visibility timeout / reaper configuration
 	VisTimeout         time.Duration
 	ReaperScanInterval time.Duration
@@ -49,6 +52,7 @@ func (p *Pool) Start(ctx context.Context) {
 	// start background goroutines
 	go p.retryPump(ctx)
 	go p.reaper(ctx)
+	go p.sampleDepths(ctx)
 	for i := 0; i < p.PoolSize; i++ {
 		go func() {
 			for {
@@ -57,18 +61,31 @@ func (p *Pool) Start(ctx context.Context) {
 					if err != nil || payload == "" {
 						continue
 					}
-					metrics.TasksDequeued.WithLabelValues(pri).Inc()
+					metrics.IncTasksDequeued(pri)
 
 					func() {
 						var t map[string]any
 						_ = json.Unmarshal([]byte(payload), &t)
 						ttype, _ := t["type"].(string)
+						if ttype == "" {
+							ttype = "unknown"
+						}
 						taskID, _ := t["task_id"].(string)
+						if enqAt, ok := parseEnqueuedAt(t["enqueued_at"]); ok {
+							metrics.ObserveEnqueueToStart(pri, time.Since(enqAt))
+						}
 						// mark running
 						p.DB.Exec(ctx, `UPDATE tasks SET status='running', attempts=attempts+1, updated_at=now() WHERE id=$1`, taskID)
 
 						// run
-						err = p.Handlers[ttype](ctx, t)
+						handler, ok := p.Handlers[ttype]
+						runStarted := time.Now()
+						if !ok {
+							err = fmt.Errorf("no handler for type %s", ttype)
+						} else {
+							err = handler(ctx, t)
+						}
+						metrics.ObserveTaskRun(ttype, time.Since(runStarted))
 						if err == nil {
 							// Success path: finalize only if we still own the lease
 							owned, ackErr := p.Q.AckOwned(ctx, payload)
@@ -79,7 +96,7 @@ func (p *Pool) Start(ctx context.Context) {
 							if owned {
 								println("[worker] done task_id=", taskID, "type=", ttype)
 								p.DB.Exec(ctx, `UPDATE tasks SET status='succeeded', updated_at=now() WHERE id=$1`, taskID)
-								metrics.TasksSucceeded.Inc()
+								metrics.TasksSucceeded.WithLabelValues(ttype, pri).Inc()
 							}
 						} else {
 							// Failure path: decide retry or DLQ
@@ -91,7 +108,7 @@ func (p *Pool) Start(ctx context.Context) {
 								// best effort: if we cannot read, DLQ only if still owned
 								if owned, _ := p.Q.AckOwned(ctx, payload); owned {
 									_ = p.Q.C.RPush(ctx, p.Q.KeyDLQ(pri), payload).Err()
-									metrics.TasksFailed.Inc()
+									metrics.TasksFailed.WithLabelValues(ttype, pri).Inc()
 									p.DB.Exec(ctx, `UPDATE tasks SET status='failed', updated_at=now() WHERE id=$1`, taskID)
 								}
 								return
@@ -101,7 +118,7 @@ func (p *Pool) Start(ctx context.Context) {
 								// Exhausted retries → DLQ (only if still owned)
 								if owned, _ := p.Q.AckOwned(ctx, payload); owned {
 									_ = p.Q.C.RPush(ctx, p.Q.KeyDLQ(pri), payload).Err()
-									metrics.TasksFailed.Inc()
+									metrics.TasksFailed.WithLabelValues(ttype, pri).Inc()
 									p.DB.Exec(ctx, `UPDATE tasks SET status='failed', updated_at=now() WHERE id=$1`, taskID)
 								}
 							} else {
@@ -160,41 +177,23 @@ func (p *Pool) retryPump(ctx context.Context) {
 		case <-ticker.C:
 			nowMs := time.Now().UnixMilli()
 			for _, pri := range priorities {
-				// fetch due items up to batch size
 				zr := &redis.ZRangeBy{Min: "-inf", Max: fmt.Sprintf("%d", nowMs), Offset: 0, Count: int64(p.RetryBatchSize)}
 				items, err := p.Q.C.ZRangeByScore(ctx, p.Q.KeyRetry(pri), zr).Result()
 				if err != nil || len(items) == 0 {
-					// update gauges even if empty
 					p.updateGauges(ctx, pri)
 					continue
 				}
 				for _, m := range items {
-					// best-effort removal guard to avoid duplicates if multiple pumps (shouldn't happen)
 					removed, _ := p.Q.C.ZRem(ctx, p.Q.KeyRetry(pri), m).Result()
 					if removed == 0 {
 						continue
 					}
-					// re-enqueue to main queue
 					_ = p.Q.Enqueue(ctx, pri, m)
 				}
-				// update gauges after processing
 				p.updateGauges(ctx, pri)
 			}
+			p.updateProcessingGauge(ctx)
 		}
-	}
-}
-
-func (p *Pool) updateGauges(ctx context.Context, pri string) {
-	// retry set depth
-	if sz, err := p.Q.C.ZCard(ctx, p.Q.KeyRetry(pri)).Result(); err == nil {
-		metrics.RetrySetDepth.WithLabelValues(pri).Set(float64(sz))
-	}
-	if dlqSz, err := p.Q.C.LLen(ctx, p.Q.KeyDLQ(pri)).Result(); err == nil {
-		metrics.DLQDepth.WithLabelValues(pri).Set(float64(dlqSz))
-	}
-	// processing inflight gauge (not per-priority)
-	if proc, err := p.Q.LLen(ctx, p.Q.Processing()); err == nil {
-		metrics.ProcessingInflight.Set(float64(proc))
 	}
 }
 
@@ -216,19 +215,14 @@ func (p *Pool) reaper(ctx context.Context) {
 			zr := &redis.ZRangeBy{Min: "-inf", Max: fmt.Sprintf("%d", nowMs), Offset: 0, Count: int64(p.ReaperBatchSize)}
 			expired, err := p.Q.C.ZRangeByScore(ctx, p.Q.KeyProcDeadlines(), zr).Result()
 			if err != nil || len(expired) == 0 {
-				// still update gauge
-				if proc, err := p.Q.LLen(ctx, p.Q.Processing()); err == nil {
-					metrics.ProcessingInflight.Set(float64(proc))
-				}
+				p.updateProcessingGauge(ctx)
 				continue
 			}
 			for _, payload := range expired {
-				// remove from deadlines set first
 				removed, _ := p.Q.C.ZRem(ctx, p.Q.KeyProcDeadlines(), payload).Result()
 				if removed == 0 {
 					continue
 				}
-				// best-effort remove from processing list
 				_, _ = p.Q.C.LRem(ctx, p.Q.Processing(), 1, payload).Result()
 				var t map[string]any
 				if err := json.Unmarshal([]byte(payload), &t); err != nil {
@@ -241,9 +235,63 @@ func (p *Pool) reaper(ctx context.Context) {
 				_ = p.Q.Enqueue(ctx, pri, payload)
 				metrics.TasksReaped.Inc()
 			}
-			if proc, err := p.Q.LLen(ctx, p.Q.Processing()); err == nil {
-				metrics.ProcessingInflight.Set(float64(proc))
-			}
+			p.updateProcessingGauge(ctx)
 		}
 	}
+}
+
+func (p *Pool) sampleDepths(ctx context.Context) {
+	interval := p.MetricsSampleInterval
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for _, pri := range priorities {
+				p.updateGauges(ctx, pri)
+			}
+			p.updateProcessingGauge(ctx)
+		}
+	}
+}
+
+func (p *Pool) updateGauges(ctx context.Context, pri string) {
+	if depth, err := p.Q.QueueDepth(ctx, pri); err == nil {
+		metrics.SetQueueDepth(pri, float64(depth))
+	}
+	if retryDepth, err := p.Q.RetryDepth(ctx, pri); err == nil {
+		metrics.SetRetryDepth(pri, float64(retryDepth))
+	}
+	if dlqDepth, err := p.Q.DLQDepth(ctx, pri); err == nil {
+		metrics.SetDLQDepth(pri, float64(dlqDepth))
+	}
+}
+
+func (p *Pool) updateProcessingGauge(ctx context.Context) {
+	if proc, err := p.Q.ProcessingDepth(ctx); err == nil {
+		metrics.SetProcessingInflight(float64(proc))
+	}
+}
+func parseEnqueuedAt(raw any) (time.Time, bool) {
+	switch v := raw.(type) {
+	case float64:
+		return time.UnixMilli(int64(v)), true
+	case int64:
+		return time.UnixMilli(v), true
+	case int:
+		return time.UnixMilli(int64(v)), true
+	case string:
+		if v == "" {
+			return time.Time{}, false
+		}
+		if ms, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return time.UnixMilli(ms), true
+		}
+	}
+	return time.Time{}, false
 }

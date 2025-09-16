@@ -1,6 +1,16 @@
-global: { scrape_interval: 2s }
+global:
+  scrape_interval: 2s
+  evaluation_interval: 2s
+
+rule_files:
+  - alerts.yml
+
 scrape_configs:
   - job_name: api
-    static_configs: [{ targets: ["host.docker.internal:2112"] }]
+    honor_labels: true
+    static_configs:
+      - targets: ["host.docker.internal:2112"]
   - job_name: worker
-    static_configs: [{ targets: ["host.docker.internal:2113"] }]
+    honor_labels: true
+    static_configs:
+      - targets: ["host.docker.internal:2113"]

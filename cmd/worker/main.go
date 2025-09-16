@@ -66,9 +66,10 @@ func main() {
 		RetryScanInterval: time.Duration(cfg.RetryScanIntervalMS) * time.Millisecond,
 		RetryBatchSize:    cfg.RetryBatchSize,
 		// visibility / reaper configuration
-		VisTimeout:         time.Duration(cfg.VisTimeoutMS) * time.Millisecond,
-		ReaperScanInterval: time.Duration(cfg.ReaperScanIntervalMS) * time.Millisecond,
-		ReaperBatchSize:    cfg.ReaperBatchSize,
+		VisTimeout:            time.Duration(cfg.VisTimeoutMS) * time.Millisecond,
+		ReaperScanInterval:    time.Duration(cfg.ReaperScanIntervalMS) * time.Millisecond,
+		ReaperBatchSize:       cfg.ReaperBatchSize,
+		MetricsSampleInterval: time.Duration(cfg.MetricsSampleMS) * time.Millisecond,
 	}
 	p.Start(ctx)
 	select {}

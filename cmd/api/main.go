@@ -115,5 +115,8 @@ func main() {
 	})
 
 	r.GET("/healthz", func(c *gin.Context) { c.String(200, "ok") })
+	r.GET("/metrics/summary", func(c *gin.Context) {
+		c.JSON(200, metrics.Summary())
+	})
 	_ = r.Run(":8080")
 }
