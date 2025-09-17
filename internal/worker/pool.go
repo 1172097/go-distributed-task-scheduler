@@ -100,11 +100,11 @@ func (p *Pool) processPayload(ctx context.Context, pri, payload string) {
 	if runErr == nil {
 		owned, ackErr := p.Q.AckOwned(ctx, payload)
 		if ackErr != nil {
-			println("[worker] ack error on success, task_id=", taskID, "err=", ackErr.Error())
+			// println("[worker] ack error on success, task_id=", taskID, "err=", ackErr.Error())
 			return
 		}
 		if owned {
-			println("[worker] done task_id=", taskID, "type=", taskType)
+			// println("[worker] done task_id=", taskID, "type=", taskType)
 			p.DB.Exec(ctx, `UPDATE tasks SET status='succeeded', updated_at=now() WHERE id=$1`, taskID)
 			metrics.IncSucceeded(taskType, priority)
 		}
@@ -112,7 +112,7 @@ func (p *Pool) processPayload(ctx context.Context, pri, payload string) {
 	}
 
 	metrics.IncFailed(taskType, priority)
-	println("[worker] FAIL task_id=", taskID, "type=", taskType, "err=", runErr)
+	// println("[worker] FAIL task_id=", taskID, "type=", taskType, "err=", runErr)
 
 	var attempts, maxRetries int
 	if qerr := p.DB.QueryRow(ctx, `SELECT attempts, max_retries FROM tasks WHERE id=$1`, taskID).Scan(&attempts, &maxRetries); qerr != nil {

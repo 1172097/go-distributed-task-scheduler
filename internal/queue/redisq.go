@@ -12,8 +12,15 @@ type RedisQ struct {
 	C *redis.Client
 }
 
-func New(addr, pass string) *RedisQ {
-	return &RedisQ{C: redis.NewClient(&redis.Options{Addr: addr, Password: pass})}
+func New(addr, pass string, poolSize, minIdle int) *RedisQ {
+	opts := &redis.Options{Addr: addr, Password: pass}
+	if poolSize > 0 {
+		opts.PoolSize = poolSize
+	}
+	if minIdle > 0 {
+		opts.MinIdleConns = minIdle
+	}
+	return &RedisQ{C: redis.NewClient(opts)}
 }
 
 func (q *RedisQ) Q(pri string) string        { return "q:" + pri }
