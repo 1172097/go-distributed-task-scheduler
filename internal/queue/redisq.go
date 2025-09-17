@@ -3,14 +3,27 @@ package queue
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
+	"github.com/1172097/scheduler/internal/metrics"
 	"github.com/redis/go-redis/v9"
 )
 
 type RedisQ struct {
 	C *redis.Client
 }
+
+var popNextScript = redis.NewScript(`
+for i = 2, #KEYS do
+  local val = redis.call('RPOP', KEYS[i])
+  if val then
+    redis.call('LPUSH', KEYS[1], val)
+    return val
+  end
+end
+return nil
+`)
 
 func New(addr, pass string, poolSize, minIdle int) *RedisQ {
 	opts := &redis.Options{Addr: addr, Password: pass}
@@ -45,6 +58,29 @@ func (q *RedisQ) BRPopLPush(ctx context.Context, pri string, timeout time.Durati
 	return payload, nil
 }
 
+// PopNext atomically claims the next payload by priority and pushes it onto processing.
+func (q *RedisQ) PopNext(ctx context.Context) (string, bool, error) {
+	keys := []string{
+		q.Processing(),
+		q.Q("critical"),
+		q.Q("high"),
+		q.Q("default"),
+		q.Q("low"),
+	}
+	res, err := popNextScript.Run(ctx, q.C, keys).Result()
+	if err == redis.Nil {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	payload, ok := res.(string)
+	if !ok {
+		return "", false, fmt.Errorf("redisq: unexpected script result %T", res)
+	}
+	return payload, true, nil
+}
+
 // Ack removes payload from processing list and deadline set
 func (q *RedisQ) Ack(ctx context.Context, payload string) error {
 	_, err := q.AckOwned(ctx, payload)
@@ -63,6 +99,7 @@ func (q *RedisQ) AckOwned(ctx context.Context, payload string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	metrics.IncAcks()
 	removed := lrem.Val() + zrem.Val()
 	return removed > 0, nil
 }

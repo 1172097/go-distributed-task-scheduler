@@ -53,32 +53,49 @@ func (p *Pool) Start(ctx context.Context) {
 	go p.reaper(ctx)
 	go p.metricsSampler(ctx)
 	for i := 0; i < p.PoolSize; i++ {
-		go func() {
-			for {
-				for _, pri := range priorities {
-					payload, err := p.Q.BRPopLPush(ctx, pri, 2*time.Second, p.VisTimeout)
-					if err != nil || payload == "" {
-						continue
-					}
-					metrics.IncDequeued(pri)
-					p.processPayload(ctx, pri, payload)
-				}
-			}
-		}()
+		go p.runWorker(ctx)
 	}
 }
 
-func (p *Pool) processPayload(ctx context.Context, pri, payload string) {
+func (p *Pool) runWorker(ctx context.Context) {
+	backoff := 5 * time.Millisecond
+	for {
+		payload, ok, err := p.Q.PopNext(ctx)
+		if err != nil {
+			time.Sleep(backoff)
+			continue
+		}
+		if !ok {
+			time.Sleep(backoff)
+			continue
+		}
+		deadline := time.Now().Add(p.VisTimeout).UnixMilli()
+		if err := p.Q.C.ZAdd(ctx, p.Q.KeyProcDeadlines(), redis.Z{Score: float64(deadline), Member: payload}).Err(); err != nil {
+			// best effort cleanup to keep processing queue consistent if deadline write fails
+			_, _ = p.Q.AckOwned(ctx, payload)
+			time.Sleep(backoff)
+			continue
+		}
+		p.processPayload(ctx, payload)
+	}
+}
+
+func (p *Pool) processPayload(ctx context.Context, payload string) {
 	var task map[string]any
 	if err := json.Unmarshal([]byte(payload), &task); err != nil {
-		// invalid payload: best effort to ack and drop
+		// invalid payload: treat as dequeued to surface via metrics, then drop
+		metrics.IncDequeued("unknown")
 		_, _ = p.Q.AckOwned(ctx, payload)
 		return
 	}
 
 	taskType, _ := task["type"].(string)
 	taskID, _ := task["task_id"].(string)
-	priority := extractPriority(task, pri)
+	priority := extractPriority(task, "default")
+	if priority == "" {
+		priority = "default"
+	}
+	metrics.IncDequeued(priority)
 	now := time.Now()
 	if wait := queueWait(now, task); wait >= 0 {
 		metrics.ObserveEnqueueToStart(priority, wait)
@@ -100,11 +117,9 @@ func (p *Pool) processPayload(ctx context.Context, pri, payload string) {
 	if runErr == nil {
 		owned, ackErr := p.Q.AckOwned(ctx, payload)
 		if ackErr != nil {
-			// println("[worker] ack error on success, task_id=", taskID, "err=", ackErr.Error())
 			return
 		}
 		if owned {
-			// println("[worker] done task_id=", taskID, "type=", taskType)
 			p.DB.Exec(ctx, `UPDATE tasks SET status='succeeded', updated_at=now() WHERE id=$1`, taskID)
 			metrics.IncSucceeded(taskType, priority)
 		}
@@ -112,38 +127,41 @@ func (p *Pool) processPayload(ctx context.Context, pri, payload string) {
 	}
 
 	metrics.IncFailed(taskType, priority)
-	// println("[worker] FAIL task_id=", taskID, "type=", taskType, "err=", runErr)
 
 	var attempts, maxRetries int
 	if qerr := p.DB.QueryRow(ctx, `SELECT attempts, max_retries FROM tasks WHERE id=$1`, taskID).Scan(&attempts, &maxRetries); qerr != nil {
 		if owned, _ := p.Q.AckOwned(ctx, payload); owned {
-			_ = p.Q.C.RPush(ctx, p.Q.KeyDLQ(pri), payload).Err()
+			_ = p.Q.C.RPush(ctx, p.Q.KeyDLQ(priority), payload).Err()
 			p.DB.Exec(ctx, `UPDATE tasks SET status='failed', updated_at=now() WHERE id=$1`, taskID)
 		}
 		return
 	}
 
+	owned, ackErr := p.Q.AckOwned(ctx, payload)
+	if ackErr != nil {
+		return
+	}
+	if !owned {
+		return
+	}
+
 	if attempts >= maxRetries {
-		if owned, _ := p.Q.AckOwned(ctx, payload); owned {
-			_ = p.Q.C.RPush(ctx, p.Q.KeyDLQ(pri), payload).Err()
-			p.DB.Exec(ctx, `UPDATE tasks SET status='failed', updated_at=now() WHERE id=$1`, taskID)
-		}
+		_ = p.Q.C.RPush(ctx, p.Q.KeyDLQ(priority), payload).Err()
+		p.DB.Exec(ctx, `UPDATE tasks SET status='failed', updated_at=now() WHERE id=$1`, taskID)
 		return
 	}
 
 	backoff := p.computeBackoff(time.Duration(attempts))
 	dueAt := time.Now().Add(backoff).UnixMilli()
-	if owned, _ := p.Q.AckOwned(ctx, payload); owned {
-		_ = p.Q.C.ZAdd(ctx, p.Q.KeyRetry(pri), redis.Z{Score: float64(dueAt), Member: payload}).Err()
-		metrics.IncRetried()
-		p.DB.Exec(ctx, `UPDATE tasks SET status='queued', updated_at=now() WHERE id=$1`, taskID)
-	}
+	_ = p.Q.C.ZAdd(ctx, p.Q.KeyRetry(priority), redis.Z{Score: float64(dueAt), Member: payload}).Err()
+	metrics.IncRetried()
+	p.DB.Exec(ctx, `UPDATE tasks SET status='queued', updated_at=now() WHERE id=$1`, taskID)
 }
 
 func (p *Pool) metricsSampler(ctx context.Context) {
 	interval := p.MetricsSampleInterval
 	if interval <= 0 {
-		interval = 2 * time.Second
+		interval = 500 * time.Millisecond
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

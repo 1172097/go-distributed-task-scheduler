@@ -13,6 +13,7 @@ var (
 		prometheus.CounterOpts{Name: "tasks_dequeued_total", Help: "Total tasks dequeued by priority."},
 		[]string{"priority"},
 	)
+	acksTotal      = prometheus.NewCounter(prometheus.CounterOpts{Name: "acks_total", Help: "Total ACK operations attempted."})
 	tasksSucceeded = prometheus.NewCounterVec(
 		prometheus.CounterOpts{Name: "tasks_succeeded_total", Help: "Total successful task executions."},
 		[]string{"type", "priority"},
@@ -47,6 +48,7 @@ func MustRegister() {
 		prometheus.MustRegister(
 			tasksEnqueued,
 			tasksDequeued,
+			acksTotal,
 			tasksSucceeded,
 			tasksFailed,
 			tasksRetried,
@@ -65,6 +67,8 @@ func MustRegister() {
 func IncEnqueued() { tasksEnqueued.Inc() }
 
 func IncDequeued(priority string) { tasksDequeued.WithLabelValues(priority).Inc() }
+
+func IncAcks() { acksTotal.Inc() }
 
 func IncSucceeded(taskType, priority string) {
 	tasksSucceeded.WithLabelValues(taskType, priority).Inc()

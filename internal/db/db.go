@@ -6,8 +6,15 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func MustOpen(ctx context.Context, url string) *pgxpool.Pool {
-	pool, err := pgxpool.New(ctx, url)
+func MustOpen(ctx context.Context, url string, maxConns int) *pgxpool.Pool {
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		panic(err)
+	}
+	if maxConns > 0 {
+		cfg.MaxConns = int32(maxConns)
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		panic(err)
 	}

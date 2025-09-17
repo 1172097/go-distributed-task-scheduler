@@ -19,6 +19,9 @@ type Config struct {
 	RedisPass            string
 	MetricsAddr          string
 	WorkerPool           int
+	PGPoolMaxConns       int
+	RedisPoolSize        int
+	RedisMinIdle         int
 	VisTimeoutMS         int
 	ReaperScanIntervalMS int
 	ReaperBatchSize      int
@@ -37,11 +40,14 @@ func FromEnv() Config {
 		RedisAddr:            getenv("REDIS_ADDR", "localhost:6379"),
 		RedisPass:            os.Getenv("REDIS_PASS"),
 		MetricsAddr:          getenv("METRICS_ADDR", ":2112"),
-		WorkerPool:           atoi(getenv("WORKER_POOL", "8")),
+		WorkerPool:           atoi(getenv("WORKER_POOL", "12")),
+		PGPoolMaxConns:       atoi(getenv("PGPOOL_MAX_CONNS", "20")),
+		RedisPoolSize:        atoi(getenv("REDIS_POOL_SIZE", "50")),
+		RedisMinIdle:         atoi(getenv("REDIS_MIN_IDLE", "10")),
 		VisTimeoutMS:         atoi(getenv("VIS_TIMEOUT_MS", "60000")),
 		ReaperScanIntervalMS: atoi(getenv("REAPER_SCAN_INTERVAL_MS", "2000")),
 		ReaperBatchSize:      atoi(getenv("REAPER_BATCH_SIZE", "100")),
-		MetricsSampleMS:      atoi(getenv("METRICS_SAMPLE_MS", "2000")),
+		MetricsSampleMS:      atoi(getenv("METRICS_SAMPLE_MS", "500")),
 
 		RetryBaseMS:         atoi(getenv("RETRY_BASE_MS", "500")),
 		RetryMaxMS:          atoi(getenv("RETRY_MAX_MS", "30000")),

@@ -66,8 +66,8 @@ func main() {
 	// - No change to handler map or API surface.
 	cfg := config.FromEnv()
 	ctx := context.Background()
-	pg := db.MustOpen(ctx, cfg.PostgresURL)
-	rq := queue.New(cfg.RedisAddr, cfg.RedisPass)
+	pg := db.MustOpen(ctx, cfg.PostgresURL, cfg.PGPoolMaxConns)
+	rq := queue.New(cfg.RedisAddr, cfg.RedisPass, cfg.RedisPoolSize, cfg.RedisMinIdle)
 	metrics.MustRegister()
 	log.Printf("Worker metrics listening on %s", cfg.MetricsAddr)
 	go func() { _ = http.ListenAndServe(cfg.MetricsAddr, promhttp.Handler()) }()

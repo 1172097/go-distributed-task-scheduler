@@ -60,12 +60,12 @@
       },
       "targets": [
         {
-          "expr": "sum by (priority) (queue_depth)",
+          "expr": "sum by (priority) (max_over_time(queue_depth[5s]))",
           "legendFormat": "{{priority}}",
           "refId": "A"
         }
       ],
-      "title": "Queue depth by priority",
+      "title": "Queue depth (5s max)",
       "type": "timeseries"
     },
     {
@@ -202,7 +202,7 @@
           "refId": "A"
         }
       ],
-      "title": "p95 enqueue→start latency",
+      "title": "p95 enqueue\u2192start latency",
       "type": "timeseries"
     },
     {
@@ -415,7 +415,7 @@
       "type": "stat"
     }
   ],
-  "refresh": "5s",
+  "refresh": "1s",
   "schemaVersion": 38,
   "style": "dark",
   "tags": [
