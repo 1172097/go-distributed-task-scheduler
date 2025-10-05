@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"math/rand"
 	"time"
@@ -122,6 +123,8 @@ func (p *Pool) processPayload(ctx context.Context, payload string) {
 		if owned {
 			p.DB.Exec(ctx, `UPDATE tasks SET status='succeeded', updated_at=now() WHERE id=$1`, taskID)
 			metrics.IncSucceeded(taskType, priority)
+			// Log successful completion
+			log.Printf("task completed: id=%s type=%s priority=%s duration=%s status=success", taskID, taskType, priority, time.Since(start).String())
 		}
 		return
 	}
@@ -133,6 +136,7 @@ func (p *Pool) processPayload(ctx context.Context, payload string) {
 		if owned, _ := p.Q.AckOwned(ctx, payload); owned {
 			_ = p.Q.C.RPush(ctx, p.Q.KeyDLQ(priority), payload).Err()
 			p.DB.Exec(ctx, `UPDATE tasks SET status='failed', updated_at=now() WHERE id=$1`, taskID)
+			log.Printf("task failed: id=%s type=%s priority=%s err=%v action=to_dlq reason=db_read_error", taskID, taskType, priority, runErr)
 		}
 		return
 	}
@@ -148,6 +152,7 @@ func (p *Pool) processPayload(ctx context.Context, payload string) {
 	if attempts >= maxRetries {
 		_ = p.Q.C.RPush(ctx, p.Q.KeyDLQ(priority), payload).Err()
 		p.DB.Exec(ctx, `UPDATE tasks SET status='failed', updated_at=now() WHERE id=$1`, taskID)
+		log.Printf("task failed: id=%s type=%s priority=%s attempts=%d max_retries=%d err=%v action=to_dlq", taskID, taskType, priority, attempts, maxRetries, runErr)
 		return
 	}
 
@@ -156,6 +161,7 @@ func (p *Pool) processPayload(ctx context.Context, payload string) {
 	_ = p.Q.C.ZAdd(ctx, p.Q.KeyRetry(priority), redis.Z{Score: float64(dueAt), Member: payload}).Err()
 	metrics.IncRetried()
 	p.DB.Exec(ctx, `UPDATE tasks SET status='queued', updated_at=now() WHERE id=$1`, taskID)
+	log.Printf("task failed: id=%s type=%s priority=%s attempts=%d max_retries=%d err=%v action=retry backoff=%s", taskID, taskType, priority, attempts, maxRetries, runErr, backoff)
 }
 
 func (p *Pool) metricsSampler(ctx context.Context) {

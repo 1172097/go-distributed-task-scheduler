@@ -2,6 +2,19 @@
 
 A Go-based task scheduling system that accepts jobs over HTTP, stores state in Postgres, and fans work out to a Redis-backed, priority-aware worker pool. Prometheus metrics, alert rules, and a Grafana dashboard are included so you can observe queue health, throughput, retries, and handler latency out of the box.
 
+> ⚠️ **Work In Progress**
+>
+> This project is under active development. Interfaces, environment variable names, metrics, and dashboard queries may change without notice. Known rough edges / TODOs include:
+>
+> - Retry & DLQ handling: logic is functional but may evolve (recording richer failure metadata, bulk retry tooling, DLQ reprocessing CLI).
+> - Grafana dashboard: current panels use longer PromQL windows; a “realtime” dashboard variant and short-window panels are planned.
+> - Logging: plain `log.Printf` (no structured/JSON logger); worker and load-generator logs can be noisy at high throughput.
+> - Backoff configuration: defaults exist, but advanced per-task tuning and jitter strategies are not finalized.
+> - Operational hardening: no auth, no rate limits, no multi-tenant isolation yet.
+> - Test coverage: integration & property tests for queue/retry pathways still to be added.
+
+<!-- > Contributions, issues, and design feedback are welcome while the surface is still settling. -->
+
 ## ✨ Features
 
 - Priority queues (`critical`, `high`, `default`, `low`) with Lua-assisted fairness.
