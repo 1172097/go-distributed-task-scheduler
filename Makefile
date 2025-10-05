@@ -26,3 +26,15 @@ migrate:
 enqueue:
 	curl -s -X POST localhost:8080/tasks -H 'Content-Type: application/json' \
 	 -d '{"type":"noop","priority":"high","payload":{"n":1}}'
+
+# Purge all queue-related Redis keys (main queues, processing, deadlines, retry sets, DLQs)
+purge-queues:
+	@echo "Purging Redis queue keys in container..." ; \
+	keys=$$(docker compose exec -T redis redis-cli KEYS 'q:*'); \
+	if [ -z "$$keys" ]; then echo "No q:* keys found" ; echo "Done." ; exit 0 ; fi ; \
+	echo "Keys:" $$keys ; \
+	for k in $$keys; do \
+	  docker compose exec -T redis redis-cli DEL "$$k" >/dev/null ; \
+	  echo "  deleted $$k" ; \
+	done ; \
+	echo "Done."
